@@ -30,8 +30,8 @@ import
   stew/[assign2, bitops2],
   json_serialization/types as jsonTypes
 
-import ./base, ./phase0
-export base
+import ./base, ./phase0, ../crypto
+export base, crypto
 
 const
   # https://github.com/ethereum/consensus-specs/blob/v1.1.2/specs/altair/beacon-chain.md#incentivization-weights

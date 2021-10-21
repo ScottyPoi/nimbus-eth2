@@ -10,14 +10,17 @@
 import chronicles, chronos
 import eth/keys
 import ../beacon_chain/spec/[datatypes/base, forks, presets]
-import ../beacon_chain/consensus_object_pools/[block_quarantine, blockchain_dag, exit_pool]
+import ../beacon_chain/consensus_object_pools/[
+    block_quarantine, blockchain_dag, exit_pool]
 import "."/[testutil, testdbutil]
 
 suite "Exit pool testing suite":
   setup:
     let
+      validatorMonitor = newClone(ValidatorMonitor.init())
       dag = init(
-        ChainDAGRef, defaultRuntimeConfig, makeTestDB(SLOTS_PER_EPOCH * 3), {})
+        ChainDAGRef, defaultRuntimeConfig, makeTestDB(SLOTS_PER_EPOCH * 3),
+        validatorMonitor, {})
       pool = newClone(ExitPool.init(dag))
 
   test "addExitMessage/getProposerSlashingMessage":

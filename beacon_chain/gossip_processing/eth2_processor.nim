@@ -108,6 +108,9 @@ type
     # ----------------------------------------------------------------
     blockProcessor: ref BlockProcessor
 
+    # Validator monitoring
+    validatorMonitor: ref ValidatorMonitor
+
     # Validated with no further verification required
     # ----------------------------------------------------------------
     exitPool: ref ExitPool
@@ -129,6 +132,7 @@ type
 proc new*(T: type Eth2Processor,
           doppelGangerDetectionEnabled: bool,
           blockProcessor: ref BlockProcessor,
+          validatorMonitor: ref ValidatorMonitor,
           dag: ChainDAGRef,
           attestationPool: ref AttestationPool,
           exitPool: ref ExitPool,
@@ -144,6 +148,7 @@ proc new*(T: type Eth2Processor,
     doppelgangerDetection: DoppelgangerProtection(
       nodeLaunchSlot: getBeaconTime().slotOrZero),
     blockProcessor: blockProcessor,
+    validatorMonitor: validatorMonitor,
     dag: dag,
     attestationPool: attestationPool,
     exitPool: exitPool,
@@ -194,9 +199,8 @@ proc blockValidator*(
   let v = self.dag.isValidBeaconBlock(
     self.quarantine, signedBlock, wallTime, {})
 
-  if v.isErr:
+  if v.isErr():
     self.blockProcessor[].dumpBlock(signedBlock, v)
-    beacon_blocks_dropped.inc(1, [$v.error[0]])
     return v.error[0]
 
   # Block passed validation - enqueue it for processing. The block processing
@@ -207,7 +211,7 @@ proc blockValidator*(
   trace "Block validated"
 
   self.blockProcessor[].addBlock(
-    ForkedSignedBeaconBlock.init(signedBlock),
+    MsgSource.gossip, ForkedSignedBeaconBlock.init(signedBlock),
     validationDur = self.getCurrentBeaconTime() - wallTime)
 
   # Validator monitor registration for blocks is done by the processor
@@ -244,9 +248,8 @@ proc checkForPotentialDoppelganger(
         quit QuitFailure
 
 proc attestationValidator*(
-    self: ref Eth2Processor,
-    attestation: Attestation,
-    subnet_id: SubnetId,
+    self: ref Eth2Processor, src: MsgSource,
+    attestation: Attestation, subnet_id: SubnetId,
     checkSignature: bool = true): Future[ValidationResult] {.async.} =
   logScope:
     attestation = shortLog(attestation)
@@ -284,13 +287,16 @@ proc attestationValidator*(
   self.attestationPool[].addAttestation(
     attestation, [attester_index], sig, wallSlot)
 
+  self.validatorMonitor[].registerUnaggregatedAttestation(
+    src, wallTime, attestation, attester_index)
+
   beacon_attestations_received.inc()
   beacon_attestation_delay.observe(delay.toFloatSeconds())
 
   return ValidationResult.Accept
 
 proc aggregateValidator*(
-    self: ref Eth2Processor,
+    self: ref Eth2Processor, src: MsgSource,
     signedAggregateAndProof: SignedAggregateAndProof): Future[ValidationResult] {.async.} =
   logScope:
     aggregate = shortLog(signedAggregateAndProof.message.aggregate)
@@ -337,14 +343,17 @@ proc aggregateValidator*(
   self.attestationPool[].addAttestation(
     signedAggregateAndProof.message.aggregate, attesting_indices, sig, wallSlot)
 
+  self.validatorMonitor[].registerAggregatedAttestation(
+    src, wallTime, signedAggregateAndProof, attesting_indices)
+
   beacon_aggregates_received.inc()
   beacon_aggregate_delay.observe(delay.toFloatSeconds())
 
   return ValidationResult.Accept
 
 proc attesterSlashingValidator*(
-    self: var Eth2Processor, attesterSlashing: AttesterSlashing):
-    ValidationResult =
+    self: var Eth2Processor, src: MsgSource,
+    attesterSlashing: AttesterSlashing): ValidationResult =
   logScope:
     attesterSlashing = shortLog(attesterSlashing)
 
@@ -354,13 +363,15 @@ proc attesterSlashingValidator*(
     beacon_attester_slashings_dropped.inc(1, [$v.error[0]])
     return v.error[0]
 
+  self.validatorMonitor[].registerAttesterSlashing(src, attesterSlashing)
+
   beacon_attester_slashings_received.inc()
 
   ValidationResult.Accept
 
 proc proposerSlashingValidator*(
-    self: var Eth2Processor, proposerSlashing: ProposerSlashing):
-    ValidationResult =
+    self: var Eth2Processor, src: MsgSource,
+    proposerSlashing: ProposerSlashing): ValidationResult =
   logScope:
     proposerSlashing = shortLog(proposerSlashing)
 
@@ -370,13 +381,15 @@ proc proposerSlashingValidator*(
     beacon_proposer_slashings_dropped.inc(1, [$v.error[0]])
     return v.error[0]
 
+  self.validatorMonitor[].registerProposerSlashing(src, proposerSlashing)
+
   beacon_proposer_slashings_received.inc()
 
   ValidationResult.Accept
 
 proc voluntaryExitValidator*(
-    self: var Eth2Processor, signedVoluntaryExit: SignedVoluntaryExit):
-    ValidationResult =
+    self: var Eth2Processor, src: MsgSource,
+    signedVoluntaryExit: SignedVoluntaryExit): ValidationResult =
   logScope:
     signedVoluntaryExit = shortLog(signedVoluntaryExit)
 
@@ -386,14 +399,15 @@ proc voluntaryExitValidator*(
     beacon_voluntary_exits_dropped.inc(1, [$v.error[0]])
     return v.error[0]
 
+  self.validatorMonitor[].registerVoluntaryExit(src, signedVoluntaryExit.message)
+
   beacon_voluntary_exits_received.inc()
 
   ValidationResult.Accept
 
 proc syncCommitteeMsgValidator*(
-    self: ref Eth2Processor,
-    syncCommitteeMsg: SyncCommitteeMessage,
-    committeeIdx: SyncSubcommitteeIndex,
+    self: ref Eth2Processor, src: MsgSource,
+    syncCommitteeMsg: SyncCommitteeMessage, committeeIdx: SyncSubcommitteeIndex,
     checkSignature: bool = true): ValidationResult =
   logScope:
     syncCommitteeMsg = shortLog(syncCommitteeMsg)
@@ -416,12 +430,15 @@ proc syncCommitteeMsgValidator*(
 
   trace "Sync committee message validated"
 
+  self.validatorMonitor[].registerSyncCommitteeMessage(
+    src, wallTime, syncCommitteeMsg)
+
   beacon_sync_committee_messages_received.inc()
 
   ValidationResult.Accept
 
 proc syncCommitteeContributionValidator*(
-    self: ref Eth2Processor,
+    self: ref Eth2Processor, src: MsgSource,
     contributionAndProof: SignedContributionAndProof,
     checkSignature: bool = true): ValidationResult =
   logScope:
@@ -447,6 +464,9 @@ proc syncCommitteeContributionValidator*(
           wallSlot
     beacon_sync_committee_contributions_dropped.inc(1, [$v.error[0]])
     return v.error[0]
+
+  self.validatorMonitor[].registerSyncCommitteeContribution(
+    src, wallTime, contributionAndProof, v.get())
 
   beacon_sync_committee_contributions_received.inc()
 

@@ -8,6 +8,7 @@
 {.push raises: [Defect].}
 
 import
+  std/sequtils,
   # Status
   chronicles, chronos, metrics,
   stew/results,
@@ -839,7 +840,7 @@ proc validateSignedContributionAndProof*(
     msg: SignedContributionAndProof,
     wallTime: BeaconTime,
     checkSignature: bool):
-    Result[void, (ValidationResult, cstring)] =
+    Result[seq[ValidatorPubKey], (ValidationResult, cstring)] =
 
   # [IGNORE] The contribution's slot is for the current slot
   # (with a MAXIMUM_GOSSIP_CLOCK_DISPARITY allowance)
@@ -908,11 +909,12 @@ proc validateSignedContributionAndProof*(
     committeeAggKey {.noInit.}: AggregatePublicKey
     initialized = false
     mixedKeys = 0
-
-  for validatorPubKey in dag.syncCommitteeParticipants(
+  let participants = toSeq(dag.syncCommitteeParticipants(
       msg.message.contribution.slot + 1,
       committeeIdx,
-      msg.message.contribution.aggregation_bits):
+      msg.message.contribution.aggregation_bits))
+
+  for validatorPubKey in participants:
     let validatorPubKey = validatorPubKey.loadWithCache.get
     if not initialized:
       initialized = true
@@ -947,4 +949,4 @@ proc validateSignedContributionAndProof*(
 
   syncCommitteeMsgPool[].addSyncContribution(msg, cookedSignature.get)
 
-  ok()
+  ok(participants)

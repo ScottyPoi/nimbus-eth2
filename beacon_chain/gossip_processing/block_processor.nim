@@ -13,7 +13,8 @@ import
   chronicles, chronos, metrics,
   ../spec/datatypes/[phase0, altair, merge],
   ../spec/[forks],
-  ../consensus_object_pools/[block_clearance, blockchain_dag, attestation_pool],
+  ../consensus_object_pools/[
+    block_clearance, blockchain_dag, attestation_pool, spec_cache],
   ./consensus_manager,
   ".."/[beacon_clock],
   ../sszdump
@@ -33,6 +34,7 @@ type
     resfut*: Future[Result[void, BlockError]]
     queueTick*: Moment # Moment when block was enqueued
     validationDur*: Duration # Time it took to perform gossip validation
+    src*: MsgSource
 
   BlockProcessor* = object
     ## This manages the processing of blocks from different sources
@@ -62,6 +64,7 @@ type
     # Consumer
     # ----------------------------------------------------------------
     consensusManager: ref ConsensusManager
+    validatorMonitor: ref ValidatorMonitor
       ## Blockchain DAG, AttestationPool and Quarantine
     getBeaconTime: GetBeaconTimeFn
 
@@ -72,6 +75,7 @@ proc new*(T: type BlockProcessor,
           dumpEnabled: bool,
           dumpDirInvalid, dumpDirIncoming: string,
           consensusManager: ref ConsensusManager,
+          validatorMonitor: ref ValidatorMonitor,
           getBeaconTime: GetBeaconTimeFn): ref BlockProcessor =
   (ref BlockProcessor)(
     dumpEnabled: dumpEnabled,
@@ -79,6 +83,7 @@ proc new*(T: type BlockProcessor,
     dumpDirIncoming: dumpDirIncoming,
     blocksQueue: newAsyncQueue[BlockEntry](),
     consensusManager: consensusManager,
+    validatorMonitor: validatorMonitor,
     getBeaconTime: getBeaconTime)
 
 # Sync callbacks
@@ -103,7 +108,7 @@ proc hasBlocks*(self: BlockProcessor): bool =
 # ------------------------------------------------------------------------------
 
 proc addBlock*(
-    self: var BlockProcessor, blck: ForkedSignedBeaconBlock,
+    self: var BlockProcessor, src: MsgSource, blck: ForkedSignedBeaconBlock,
     resfut: Future[Result[void, BlockError]] = nil,
     validationDur = Duration()) =
   ## Enqueue a Gossip-validated block for consensus verification
@@ -121,7 +126,8 @@ proc addBlock*(
     self.blocksQueue.addLastNoWait(BlockEntry(
       blck: blck,
       resfut: resfut, queueTick: Moment.now(),
-      validationDur: validationDur))
+      validationDur: validationDur,
+      src: src))
   except AsyncQueueFullError:
     raiseAssert "unbounded queue"
 
@@ -146,11 +152,17 @@ proc dumpBlock*[T](
 
 proc storeBlock*(
     self: var BlockProcessor,
+    src: MsgSource, wallTime: BeaconTime,
     signedBlock: phase0.SignedBeaconBlock | altair.SignedBeaconBlock |
-                 merge.SignedBeaconBlock,
-    wallSlot: Slot): Result[BlockRef, BlockError] =
+                 merge.SignedBeaconBlock): Result[BlockRef, BlockError] =
+  ## storeBlock is the main entry point for unvalidated blocks - all untrusted
+  ## blocks, regardless of origin, pass through here. When storing a block,
+  ## we will add it to the dag and pass it to all block consumers that need
+  ## to know about it, such as the fork choice and the monitoring
   let
     attestationPool = self.consensusManager.attestationPool
+    wallSlot = wallTime.slotOrZero()
+    vm = self.validatorMonitor
 
   type Trusted = typeof signedBlock.asTrusted()
   let blck = self.consensusManager.dag.addRawBlock(
@@ -159,6 +171,15 @@ proc storeBlock*(
     # Callback add to fork choice if valid
     attestationPool[].addForkChoice(
       epochRef, blckRef, trustedBlock.message, wallSlot)
+
+    vm[].registerBeaconBlock(
+      src, wallTime, trustedBlock.message)
+
+    for attestation in trustedBlock.message.body.attestations:
+      for idx in get_attesting_indices(
+          epochRef, attestation.data, attestation.aggregation_bits):
+        vm[].registerAttestationInBlock(attestation.data, idx,
+          trustedBlock.message)
 
   self.dumpBlock(signedBlock, blck)
 
@@ -186,7 +207,7 @@ proc processBlock(self: var BlockProcessor, entry: BlockEntry) =
 
   let
     startTick = Moment.now()
-    res = withBlck(entry.blck): self.storeBlock(blck, wallSlot)
+    res = withBlck(entry.blck): self.storeBlock(entry.src, wallTime, blck)
     storeBlockTick = Moment.now()
 
   if res.isOk():

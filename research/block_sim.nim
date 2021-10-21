@@ -87,7 +87,8 @@ cli do(slots = SLOTS_PER_EPOCH * 6,
     validatorKeyToIndex[state.data.validators[i].pubkey] = i
 
   var
-    dag = ChainDAGRef.init(cfg, db, {})
+    validatorMonitor = newClone(ValidatorMonitor.init())
+    dag = ChainDAGRef.init(cfg, db, validatorMonitor, {})
     eth1Chain = Eth1Chain.init(cfg, db)
     merkleizer = depositContractSnapshot.createMerkleizer
     taskpool = Taskpool.new()

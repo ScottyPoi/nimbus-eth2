@@ -30,7 +30,7 @@ import
   ./networking/[eth2_discovery, eth2_network, network_metadata],
   ./gossip_processing/[eth2_processor, block_processor, consensus_manager],
   ./validators/[
-    validator_duties, validator_pool,
+    validator_duties, validator_monitor, validator_pool,
     slashing_protection, keystore_management],
   ./sync/[sync_manager, sync_protocol, request_manager],
   ./rpc/[rest_api, rpc_api],
@@ -278,10 +278,18 @@ proc init*(T: type BeaconNode,
   info "Loading block dag from database", path = config.databaseDir
 
   let
+    validatorMonitor = newClone(ValidatorMonitor.init(
+      config.validatorMonitorAuto))
+
+  for key in config.validatorMonitorPubkeys:
+    validatorMonitor[].addMonitor(key, none(ValidatorIndex))
+
+  let
     chainDagFlags = if config.verifyFinalization: {verifyFinalization}
                      else: {}
-    dag = ChainDAGRef.init(cfg, db, chainDagFlags, onBlockAdded, onHeadChanged,
-                           onChainReorg, onFinalization)
+    dag = ChainDAGRef.init(
+      cfg, db, validatorMonitor, chainDagFlags, onBlockAdded, onHeadChanged,
+      onChainReorg, onFinalization)
     quarantine = QuarantineRef.init(rng, taskpool)
     databaseGenesisValidatorsRoot =
       getStateField(dag.headState.data, genesis_validators_root)
@@ -388,11 +396,12 @@ proc init*(T: type BeaconNode,
     )
     blockProcessor = BlockProcessor.new(
       config.dumpEnabled, config.dumpDirInvalid, config.dumpDirIncoming,
-      consensusManager, getBeaconTime)
+      consensusManager, validatorMonitor, getBeaconTime)
     processor = Eth2Processor.new(
       config.doppelgangerDetection,
-      blockProcessor, dag, attestationPool, exitPool, validatorPool,
-      syncCommitteeMsgPool, quarantine, rng, getBeaconTime, taskpool)
+      blockProcessor, validatorMonitor, dag, attestationPool, exitPool,
+      validatorPool, syncCommitteeMsgPool, quarantine, rng, getBeaconTime,
+      taskpool)
 
   var node = BeaconNode(
     nickname: nickname,
@@ -1016,12 +1025,14 @@ proc installMessageValidators(node: BeaconNode) =
         getAttestationTopic(node.dag.forkDigests.phase0, subnet_id),
         # This proc needs to be within closureScope; don't lift out of loop.
         proc(attestation: Attestation): Future[ValidationResult] =
-          node.processor.attestationValidator(attestation, subnet_id))
+          node.processor.attestationValidator(
+            MsgSource.gossip, attestation, subnet_id))
 
   node.network.addAsyncValidator(
     getAggregateAndProofsTopic(node.dag.forkDigests.phase0),
     proc(signedAggregateAndProof: SignedAggregateAndProof): Future[ValidationResult] =
-      node.processor.aggregateValidator(signedAggregateAndProof))
+      node.processor.aggregateValidator(
+        MsgSource.gossip, signedAggregateAndProof))
 
   node.network.addValidator(
     getBeaconBlocksTopic(node.dag.forkDigests.phase0),
@@ -1031,17 +1042,20 @@ proc installMessageValidators(node: BeaconNode) =
   node.network.addValidator(
     getAttesterSlashingsTopic(node.dag.forkDigests.phase0),
     proc (attesterSlashing: AttesterSlashing): ValidationResult =
-      node.processor[].attesterSlashingValidator(attesterSlashing))
+      node.processor[].attesterSlashingValidator(
+        MsgSource.gossip, attesterSlashing))
 
   node.network.addValidator(
     getProposerSlashingsTopic(node.dag.forkDigests.phase0),
     proc (proposerSlashing: ProposerSlashing): ValidationResult =
-      node.processor[].proposerSlashingValidator(proposerSlashing))
+      node.processor[].proposerSlashingValidator(
+        MsgSource.gossip, proposerSlashing))
 
   node.network.addValidator(
     getVoluntaryExitsTopic(node.dag.forkDigests.phase0),
     proc (signedVoluntaryExit: SignedVoluntaryExit): ValidationResult =
-      node.processor[].voluntaryExitValidator(signedVoluntaryExit))
+      node.processor[].voluntaryExitValidator(
+        MsgSource.gossip, signedVoluntaryExit))
 
   # TODO copy/paste starts here; templatize whole thing
   for it in 0'u64 ..< ATTESTATION_SUBNET_COUNT.uint64:
@@ -1051,12 +1065,14 @@ proc installMessageValidators(node: BeaconNode) =
         getAttestationTopic(node.dag.forkDigests.altair, subnet_id),
         # This proc needs to be within closureScope; don't lift out of loop.
         proc(attestation: Attestation): Future[ValidationResult] =
-          node.processor.attestationValidator(attestation, subnet_id))
+          node.processor.attestationValidator(
+            MsgSource.gossip, attestation, subnet_id))
 
   node.network.addAsyncValidator(
     getAggregateAndProofsTopic(node.dag.forkDigests.altair),
     proc(signedAggregateAndProof: SignedAggregateAndProof): Future[ValidationResult] =
-      node.processor.aggregateValidator(signedAggregateAndProof))
+      node.processor.aggregateValidator(
+        MsgSource.gossip, signedAggregateAndProof))
 
   node.network.addValidator(
     getBeaconBlocksTopic(node.dag.forkDigests.altair),
@@ -1066,17 +1082,20 @@ proc installMessageValidators(node: BeaconNode) =
   node.network.addValidator(
     getAttesterSlashingsTopic(node.dag.forkDigests.altair),
     proc (attesterSlashing: AttesterSlashing): ValidationResult =
-      node.processor[].attesterSlashingValidator(attesterSlashing))
+      node.processor[].attesterSlashingValidator(
+        MsgSource.gossip, attesterSlashing))
 
   node.network.addValidator(
     getProposerSlashingsTopic(node.dag.forkDigests.altair),
     proc (proposerSlashing: ProposerSlashing): ValidationResult =
-      node.processor[].proposerSlashingValidator(proposerSlashing))
+      node.processor[].proposerSlashingValidator(
+        MsgSource.gossip, proposerSlashing))
 
   node.network.addValidator(
     getVoluntaryExitsTopic(node.dag.forkDigests.altair),
     proc (signedVoluntaryExit: SignedVoluntaryExit): ValidationResult =
-      node.processor[].voluntaryExitValidator(signedVoluntaryExit))
+      node.processor[].voluntaryExitValidator(
+        MsgSource.gossip, signedVoluntaryExit))
 
   for committeeIdx in allSyncSubcommittees():
     closureScope:
@@ -1085,12 +1104,12 @@ proc installMessageValidators(node: BeaconNode) =
         getSyncCommitteeTopic(node.dag.forkDigests.altair, idx),
         # This proc needs to be within closureScope; don't lift out of loop.
         proc(msg: SyncCommitteeMessage): ValidationResult =
-          node.processor.syncCommitteeMsgValidator(msg, idx))
+          node.processor.syncCommitteeMsgValidator(MsgSource.gossip, msg, idx))
 
   node.network.addValidator(
     getSyncCommitteeContributionAndProofTopic(node.dag.forkDigests.altair),
     proc(msg: SignedContributionAndProof): ValidationResult =
-      node.processor.syncCommitteeContributionValidator(msg))
+      node.processor.syncCommitteeContributionValidator(MsgSource.gossip, msg))
 
 proc stop*(node: BeaconNode) =
   bnStatus = BeaconNodeStatus.Stopping

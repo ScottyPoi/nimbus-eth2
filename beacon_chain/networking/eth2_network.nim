@@ -2160,6 +2160,18 @@ proc broadcastBeaconBlock*(node: Eth2Node, blck: merge.SignedBeaconBlock) =
   let topic = getBeaconBlocksTopic(node.forkDigests.merge)
   node.broadcast(topic, blck)
 
+proc broadcastBeaconBlock*(node: Eth2Node, blck: phase0.SignedBeaconBlock) =
+  let topic = getBeaconBlocksTopic(node.forkDigests.phase0)
+  node.broadcast(topic, blck)
+
+proc broadcastBeaconBlock*(node: Eth2Node, blck: altair.SignedBeaconBlock) =
+  let topic = getBeaconBlocksTopic(node.forkDigests.altair)
+  node.broadcast(topic, blck)
+
+proc broadcastBeaconBlock*(node: Eth2Node, blck: merge.SignedBeaconBlock) =
+  let topic = getBeaconBlocksTopic(node.forkDigests.merge)
+  node.broadcast(topic, blck)
+
 proc broadcastBeaconBlock*(node: Eth2Node, forked: ForkedSignedBeaconBlock) =
   withBlck(forked): node.broadcastBeaconBlock(blck)
 
