@@ -865,6 +865,18 @@ proc sendAggregatedAttestations(
 
   await allFutures(slotSigs)
 
+  var attestBySubnet: array[64, int]
+  var attestByIndex: array[64, int]
+  for slot_index in 0'u64..<64:
+    let candidates = toSeq(node.attestationPool[].attestations(some(aggregationSlot), some(slot_index.CommitteeIndex))).filterIt(it.aggregation_bits.countOnes() == 1).len()
+    let subnet_id = compute_subnet_for_attestation(
+      committees_per_slot, aggregationSlot, slot_index.CommitteeIndex)
+    #info "Slot info", slot_index, subnet_id, candidates
+    attestByIndex[slot_index.int] = candidates
+    attestBySubnet[subnet_id.int] = candidates
+  info "Slot info", aggregationSlot, attestBySubnet, attestByIndex
+
+
   for curr in zip(slotSigsData, slotSigs):
     let aggregateAndProof =
       makeAggregateAndProof(node.attestationPool[], epochRef, aggregationSlot,
